@@ -1,0 +1,225 @@
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import gymnasium as gym
+from collections import deque
+import time
+
+# ======================
+# 超參數
+# ======================
+EPISODES = 5000
+GAMMA = 0.99
+TAU = 0.005
+LR_ACTOR = 3e-4
+LR_CRITIC = 3e-4
+LR_ALPHA = 3e-4
+BATCH_SIZE = 128
+MEMORY_SIZE = 1000
+TARGET_ENTROPY = -1.0  # 熵目標，對於離散動作常設為 -action_dim
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", DEVICE)
+
+# ======================
+# 神經網路
+# ======================
+class Actor(nn.Module):
+	def __init__(self, state_dim, action_dim):
+        super(Actor, self).__init__()
+        self.fc1 = nn.Linear(state_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_dim)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        logits = self.fc3(x)  # 動作 logits
+        return torch.softmax(logits, dim=-1)  # 動作分布
+
+class Critic(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(Critic, self).__init__()
+        self.fc1 = nn.Linear(state_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_dim)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)  # Q(s, a)
+
+# ======================
+# 記憶體
+# ======================
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+        
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+        
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = map(np.array, zip(*batch))
+        return (
+            torch.FloatTensor(state).to(DEVICE),
+            torch.LongTensor(action).to(DEVICE),
+            torch.FloatTensor(reward).to(DEVICE),
+            torch.FloatTensor(next_state).to(DEVICE),
+            torch.FloatTensor(done).to(DEVICE),
+        )
+    
+    def __len__(self):
+        return len(self.buffer)
+
+# ======================
+# SAC 訓練
+# ======================
+def train():
+    env = gym.make("CartPole-v1")
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+    
+    actor = Actor(state_dim, action_dim).to(DEVICE)
+    critic1 = Critic(state_dim, action_dim).to(DEVICE)
+    critic2 = Critic(state_dim, action_dim).to(DEVICE)
+    target_critic1 = Critic(state_dim, action_dim).to(DEVICE)
+    target_critic2 = Critic(state_dim, action_dim).to(DEVICE)
+    
+    target_critic1.load_state_dict(critic1.state_dict())
+    target_critic2.load_state_dict(critic2.state_dict())
+    
+    actor_optimizer = optim.Adam(actor.parameters(), lr=LR_ACTOR)
+    critic1_optimizer = optim.Adam(critic1.parameters(), lr=LR_CRITIC)
+    critic2_optimizer = optim.Adam(critic2.parameters(), lr=LR_CRITIC)
+    
+    log_alpha = torch.zeros(1, requires_grad=True, device=DEVICE)
+    alpha_optimizer = optim.Adam([log_alpha], lr=LR_ALPHA)
+    
+    memory = ReplayBuffer(MEMORY_SIZE)
+    
+    for episode in range(EPISODES):
+        state, _ = env.reset()
+        env.unwrapped.state = np.array([random.random()-0.5, 0.0, 0.4*random.random()-0.2, 0.0])
+        total_reward = 0
+        done = False
+        step_losses = []
+        
+        while not done:
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+            with torch.no_grad():
+                action_probs = actor(state_tensor)
+            action = np.random.choice(action_dim, p=action_probs.cpu().numpy()[0])
+            
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+            
+            memory.push(state, action, reward, next_state, done)
+            state = next_state
+            
+            if len(memory) >= BATCH_SIZE:
+                states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
+                
+                # --------------------
+                # 更新 Critic
+                # --------------------
+                with torch.no_grad():
+                    next_action_probs = actor(next_states)
+                    next_q1 = target_critic1(next_states)
+                    next_q2 = target_critic2(next_states)
+                    next_q = torch.min(next_q1, next_q2)
+                    
+                    next_log_probs = torch.log(next_action_probs + 1e-10)
+                    entropy_term = (next_action_probs * next_log_probs).sum(dim=1, keepdim=True)
+                    
+                    target_q = rewards.unsqueeze(1) + GAMMA * (1 - dones.unsqueeze(1)) * (
+                        (next_action_probs * (next_q - torch.exp(log_alpha) * next_log_probs)).sum(dim=1, keepdim=True))
+                    
+                q1 = critic1(states).gather(1, actions.unsqueeze(1))
+                q2 = critic2(states).gather(1, actions.unsqueeze(1))
+                critic1_loss = nn.MSELoss()(q1, target_q)
+                critic2_loss = nn.MSELoss()(q2, target_q)
+                
+                critic1_optimizer.zero_grad()
+                critic1_loss.backward()
+                critic1_optimizer.step()
+                
+                critic2_optimizer.zero_grad()
+                critic2_loss.backward()
+                critic2_optimizer.step()
+                
+                # --------------------
+                # 更新 Actor
+                # --------------------
+                action_probs = actor(states)
+                log_probs = torch.log(action_probs + 1e-10)
+                q1_pi = critic1(states)
+                q2_pi = critic2(states)
+                q_pi = torch.min(q1_pi, q2_pi)
+                
+                actor_loss = (action_probs * (torch.exp(log_alpha) * log_probs - q_pi)).sum(dim=1).mean()
+                
+                actor_optimizer.zero_grad()
+                actor_loss.backward()
+                actor_optimizer.step()
+                
+                # --------------------
+                # 更新 alpha (溫度參數)
+                # --------------------
+                alpha_loss = -(log_alpha * (log_probs.sum(dim=1).detach() + TARGET_ENTROPY)).mean()
+                
+                alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                alpha_optimizer.step()
+                
+                # --------------------
+                # 更新 Target Critics
+                # --------------------
+                for target_param, param in zip(target_critic1.parameters(), critic1.parameters()):
+                    target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+                    
+                for target_param, param in zip(target_critic2.parameters(), critic2.parameters()):
+                    target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+                    
+        print(f"Epi {episode}, R: {total_reward:.1f}")
+        
+    env.close()
+    torch.save(actor.state_dict(), "sac_cartpole_actor.pth")
+    print("模型已儲存為 sac_cartpole_actor.pth")
+    return actor
+
+# ======================
+# 渲染測試
+# ======================
+def test_render(model_path="sac_cartpole_actor.pth"):
+    env = gym.make("CartPole-v1", render_mode="human")
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+    
+    model = Actor(state_dim, action_dim).to(DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.eval()
+    
+    state, _ = env.reset()
+    done = False
+    total_reward = 0
+    
+    while not done:
+        with torch.no_grad():
+            action_probs = model(torch.FloatTensor(state).unsqueeze(0).to(DEVICE))
+        action = np.random.choice(action_dim, p=action_probs.cpu().numpy()[0])
+        state, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        total_reward += reward
+#        time.sleep(0.02)
+        
+    env.close()
+    print(f"測試完成，總分數: {total_reward}")
+
+if __name__ == "__main__":
+    actor = train()
+    test_render()
