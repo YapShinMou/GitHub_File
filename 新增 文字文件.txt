@@ -1,0 +1,10 @@
+sudo apt  install gedit
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash ~/Miniconda3-latest-Linux-x86_64.sh
+source .bashrc
+(base)  conda create -n env_1 python=3.9
+(base)  conda activate env_1
+(env_1)  pip install mujoco
+(env_1)  pip install mujoco-python-viewer 沒做
+sudo apt install libgl1-mesa-dev libglapi-mesa 沒做
+(env_1)  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
