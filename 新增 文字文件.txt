@@ -8,3 +8,17 @@ source .bashrc
 (env_1)  pip install mujoco-python-viewer 沒做
 sudo apt install libgl1-mesa-dev libglapi-mesa 沒做
 (env_1)  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pranz24
+unitree_rl_gym
+rsl_rl
+(env_1) pip install tensordict
+
+
+(base) conda create -n P_10 python=3.10
+(base)  conda activate P_10
+(P_10) pip install mujoco
+(P_10) pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+(P_10) pip install tensordict
+(P_10) pip install GitPython
+(P_10) pip install tensorboard
+(P_10) pip install PyYAML
